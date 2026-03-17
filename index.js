@@ -23,7 +23,6 @@ import {
 // ============================================================================
 
 const EXTENSION_NAME = 'smart-rag-lorebook';
-const EXTENSION_FOLDER = `third_party/${EXTENSION_NAME}`;
 
 const DEFAULT_SETTINGS = {
     // Basic
@@ -826,12 +825,228 @@ function toggleAdvancedSettings() {
 }
 
 // ============================================================================
+// Settings Panel HTML (inline - no external file dependency)
+// ============================================================================
+
+const SETTINGS_HTML = `
+<div id="smart-rag-lorebook-settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>Smart RAG Lorebook</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+
+            <!-- ========== BASIC SETTINGS ========== -->
+
+            <div class="smart-rag-setting-row">
+                <label class="checkbox_label" for="smart_rag_enabled">
+                    <input type="checkbox" id="smart_rag_enabled" />
+                    <span>Enable Smart RAG</span>
+                </label>
+            </div>
+
+            <hr />
+
+            <h4>Worker AI Connection</h4>
+
+            <div class="smart-rag-setting-row">
+                <label for="smart_rag_worker_endpoint">API Endpoint</label>
+                <input type="text" id="smart_rag_worker_endpoint" class="text_pole" placeholder="http://localhost:11434/v1/chat/completions" />
+                <small class="smart-rag-hint">OpenAI-compatible endpoint (Ollama, LM Studio, OpenRouter, etc.)</small>
+            </div>
+
+            <div class="smart-rag-setting-row">
+                <label for="smart_rag_worker_model">Model Name</label>
+                <input type="text" id="smart_rag_worker_model" class="text_pole" placeholder="llama3:8b" />
+            </div>
+
+            <div class="smart-rag-setting-row">
+                <label for="smart_rag_worker_api_key">API Key (optional)</label>
+                <input type="password" id="smart_rag_worker_api_key" class="text_pole" placeholder="Leave empty for local models" />
+            </div>
+
+            <hr />
+
+            <h4>Basic Behavior</h4>
+
+            <div class="smart-rag-setting-row">
+                <label class="checkbox_label" for="smart_rag_auto_generate">
+                    <input type="checkbox" id="smart_rag_auto_generate" />
+                    <span>Auto-generate Lite versions on chat start</span>
+                </label>
+                <small class="smart-rag-hint">Automatically compress long lorebook entries when opening a chat</small>
+            </div>
+
+            <div class="smart-rag-setting-row">
+                <label class="checkbox_label" for="smart_rag_inject_system_prompt">
+                    <input type="checkbox" id="smart_rag_inject_system_prompt" />
+                    <span>Inject FETCH instructions into system prompt</span>
+                </label>
+                <small class="smart-rag-hint">Teaches the Main AI how to request deep lore via [FETCH: #tag]</small>
+            </div>
+
+            <hr />
+
+            <!-- ========== ACTIONS ========== -->
+
+            <h4>Actions</h4>
+            <div class="smart-rag-button-row">
+                <input type="button" id="smart_rag_generate_all" class="menu_button" value="Generate All Lite" />
+                <input type="button" id="smart_rag_clear_cache" class="menu_button" value="Clear Cache" />
+                <input type="button" id="smart_rag_test_worker" class="menu_button" value="Test Connection" />
+            </div>
+
+            <div id="smart_rag_status" class="smart-rag-status"></div>
+
+            <hr />
+
+            <!-- ========== ADVANCED SETTINGS (Spoiler) ========== -->
+
+            <div class="smart-rag-advanced-toggle" id="smart_rag_advanced_toggle">
+                <span class="fa-solid fa-gear"></span>
+                <span>Advanced Settings</span>
+                <span class="fa-solid fa-chevron-down smart-rag-advanced-arrow"></span>
+            </div>
+
+            <div class="smart-rag-advanced-content" id="smart_rag_advanced_content">
+
+                <!-- Cache & Save -->
+                <h4>Cache & Saving</h4>
+
+                <div class="smart-rag-setting-row">
+                    <label for="smart_rag_save_interval">Auto-save interval (seconds)</label>
+                    <input type="number" id="smart_rag_save_interval" class="text_pole" min="5" max="600" step="5" />
+                    <small class="smart-rag-hint">How often to persist the Lite cache to settings (0 = save immediately)</small>
+                </div>
+
+                <div class="smart-rag-setting-row">
+                    <label for="smart_rag_cache_ttl">Cache TTL (hours)</label>
+                    <input type="number" id="smart_rag_cache_ttl" class="text_pole" min="0" max="8760" step="1" />
+                    <small class="smart-rag-hint">Cached Lite entries older than this will be regenerated (0 = never expire)</small>
+                </div>
+
+                <div class="smart-rag-setting-row">
+                    <label for="smart_rag_max_cache_entries">Max cached entries</label>
+                    <input type="number" id="smart_rag_max_cache_entries" class="text_pole" min="10" max="10000" step="10" />
+                    <small class="smart-rag-hint">Oldest entries are evicted when limit is reached</small>
+                </div>
+
+                <hr />
+
+                <!-- Content Thresholds -->
+                <h4>Content Thresholds</h4>
+
+                <div class="smart-rag-setting-row">
+                    <label for="smart_rag_min_content_length">Min content length to summarize (chars)</label>
+                    <input type="number" id="smart_rag_min_content_length" class="text_pole" min="100" max="50000" step="100" />
+                    <small class="smart-rag-hint">Entries shorter than this will be injected as-is without compression</small>
+                </div>
+
+                <div class="smart-rag-setting-row">
+                    <label for="smart_rag_max_lite_entries">Max Lite entries per generation</label>
+                    <input type="number" id="smart_rag_max_lite_entries" class="text_pole" min="1" max="200" step="1" />
+                    <small class="smart-rag-hint">Limit how many Lite contexts are injected into each prompt</small>
+                </div>
+
+                <hr />
+
+                <!-- Worker AI Tuning -->
+                <h4>Worker AI Tuning</h4>
+
+                <div class="smart-rag-setting-row">
+                    <label for="smart_rag_worker_temperature">Temperature</label>
+                    <div class="smart-rag-range-row">
+                        <input type="range" id="smart_rag_worker_temperature" min="0" max="1" step="0.05" />
+                        <span id="smart_rag_worker_temperature_value" class="smart-rag-range-value">0.2</span>
+                    </div>
+                    <small class="smart-rag-hint">Lower = more consistent summaries, higher = more creative</small>
+                </div>
+
+                <div class="smart-rag-setting-row">
+                    <label for="smart_rag_worker_max_tokens">Max response tokens</label>
+                    <input type="number" id="smart_rag_worker_max_tokens" class="text_pole" min="128" max="4096" step="64" />
+                    <small class="smart-rag-hint">Maximum tokens for the Worker AI Lite JSON response</small>
+                </div>
+
+                <div class="smart-rag-setting-row">
+                    <label for="smart_rag_worker_timeout">Request timeout (seconds)</label>
+                    <input type="number" id="smart_rag_worker_timeout" class="text_pole" min="5" max="300" step="5" />
+                    <small class="smart-rag-hint">Abort Worker AI request after this many seconds</small>
+                </div>
+
+                <hr />
+
+                <!-- Injection Settings -->
+                <h4>Injection Settings</h4>
+
+                <div class="smart-rag-setting-row">
+                    <label for="smart_rag_injection_position">Injection position</label>
+                    <select id="smart_rag_injection_position" class="text_pole">
+                        <option value="0">After character definition (IN_PROMPT)</option>
+                        <option value="1">Before system prompt (BEFORE_PROMPT)</option>
+                        <option value="2">After system prompt (AFTER_PROMPT)</option>
+                        <option value="4">At depth in chat (AT_DEPTH)</option>
+                    </select>
+                    <small class="smart-rag-hint">Where to place the Lite context in the prompt</small>
+                </div>
+
+                <div class="smart-rag-setting-row smart-rag-depth-row" id="smart_rag_depth_row">
+                    <label for="smart_rag_injection_depth">Injection depth</label>
+                    <input type="number" id="smart_rag_injection_depth" class="text_pole" min="0" max="100" step="1" />
+                    <small class="smart-rag-hint">Number of messages from the end (only for AT_DEPTH)</small>
+                </div>
+
+                <hr />
+
+                <!-- Deep Fetch Settings -->
+                <h4>Deep Fetch</h4>
+
+                <div class="smart-rag-setting-row">
+                    <label for="smart_rag_max_fetch_depth">Max FETCH depth per message</label>
+                    <input type="number" id="smart_rag_max_fetch_depth" class="text_pole" min="1" max="10" step="1" />
+                    <small class="smart-rag-hint">Max consecutive FETCH cycles before forcing a response (prevents loops)</small>
+                </div>
+
+                <div class="smart-rag-setting-row">
+                    <label class="checkbox_label" for="smart_rag_show_fetch_toast">
+                        <input type="checkbox" id="smart_rag_show_fetch_toast" />
+                        <span>Show notification on FETCH</span>
+                    </label>
+                    <small class="smart-rag-hint">Display a toast when the AI triggers a deep lore fetch</small>
+                </div>
+
+                <hr />
+
+                <!-- Debug -->
+                <h4>Debug</h4>
+
+                <div class="smart-rag-setting-row">
+                    <label class="checkbox_label" for="smart_rag_debug_mode">
+                        <input type="checkbox" id="smart_rag_debug_mode" />
+                        <span>Debug mode</span>
+                    </label>
+                    <small class="smart-rag-hint">Log detailed info to browser console (F12)</small>
+                </div>
+
+                <div class="smart-rag-button-row">
+                    <input type="button" id="smart_rag_export_cache" class="menu_button" value="Export Cache (JSON)" />
+                    <input type="button" id="smart_rag_import_cache" class="menu_button" value="Import Cache" />
+                </div>
+                <input type="file" id="smart_rag_import_file" accept=".json" style="display:none" />
+            </div>
+
+        </div>
+    </div>
+</div>
+`;
+
+// ============================================================================
 // Initialization
 // ============================================================================
 
 jQuery(async () => {
-    const settingsHtml = await $.get(`${EXTENSION_FOLDER}/index.html`);
-    $('#extensions_settings2').append(settingsHtml);
+    $('#extensions_settings2').append(SETTINGS_HTML);
 
     loadSettings();
 
