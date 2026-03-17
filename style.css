@@ -23,7 +23,7 @@
 
 #smart-rag-lorebook-settings .smart-rag-button-row .menu_button {
     flex: 1;
-    min-width: 120px;
+    min-width: 100px;
 }
 
 #smart-rag-lorebook-settings .smart-rag-status {
@@ -58,4 +58,70 @@
 #smart-rag-lorebook-settings h4 {
     margin: 6px 0 8px;
     font-size: 1em;
+}
+
+/* ========== Advanced Settings Spoiler ========== */
+
+#smart-rag-lorebook-settings .smart-rag-advanced-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    cursor: pointer;
+    border-radius: 4px;
+    background-color: var(--SmartThemeBlurTintColor, rgba(255, 255, 255, 0.05));
+    user-select: none;
+    font-weight: 600;
+    font-size: 0.95em;
+    transition: background-color 0.15s;
+}
+
+#smart-rag-lorebook-settings .smart-rag-advanced-toggle:hover {
+    background-color: var(--SmartThemeBodyColor, rgba(255, 255, 255, 0.1));
+}
+
+#smart-rag-lorebook-settings .smart-rag-advanced-arrow {
+    margin-left: auto;
+    transition: transform 0.2s;
+    font-size: 0.8em;
+}
+
+#smart-rag-lorebook-settings .smart-rag-advanced-toggle.open .smart-rag-advanced-arrow {
+    transform: rotate(180deg);
+}
+
+#smart-rag-lorebook-settings .smart-rag-advanced-content {
+    display: none;
+    margin-top: 10px;
+    padding: 10px;
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    border-radius: 4px;
+    background-color: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.1));
+}
+
+#smart-rag-lorebook-settings .smart-rag-advanced-content.open {
+    display: block;
+}
+
+/* Range slider row */
+#smart-rag-lorebook-settings .smart-rag-range-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+#smart-rag-lorebook-settings .smart-rag-range-row input[type="range"] {
+    flex: 1;
+}
+
+#smart-rag-lorebook-settings .smart-rag-range-value {
+    min-width: 35px;
+    text-align: center;
+    font-weight: 600;
+    font-size: 0.9em;
+}
+
+/* Depth row visibility */
+#smart-rag-lorebook-settings .smart-rag-depth-row.hidden {
+    display: none;
 }

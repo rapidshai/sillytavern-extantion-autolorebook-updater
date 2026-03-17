@@ -24,16 +24,35 @@ import {
 
 const EXTENSION_NAME = 'smart-rag-lorebook';
 const EXTENSION_FOLDER = `third_party/${EXTENSION_NAME}`;
-const LITE_CACHE_KEY = 'smart_rag_lite_cache';
 
 const DEFAULT_SETTINGS = {
+    // Basic
     enabled: true,
     worker_endpoint: 'http://localhost:11434/v1/chat/completions',
     worker_model: 'llama3:8b',
     worker_api_key: '',
-    min_content_length: 500,
     auto_generate: true,
     inject_system_prompt: true,
+    // Advanced: Cache & Saving
+    save_interval: 30,
+    cache_ttl: 0,
+    max_cache_entries: 500,
+    // Advanced: Content Thresholds
+    min_content_length: 500,
+    max_lite_entries: 50,
+    // Advanced: Worker AI Tuning
+    worker_temperature: 0.2,
+    worker_max_tokens: 1024,
+    worker_timeout: 60,
+    // Advanced: Injection
+    injection_position: 0,
+    injection_depth: 4,
+    // Advanced: Deep Fetch
+    max_fetch_depth: 3,
+    show_fetch_toast: true,
+    // Advanced: Debug
+    debug_mode: false,
+    // Internal
     lite_cache: {},
 };
 
@@ -78,14 +97,22 @@ RULES FOR FETCHING MEMORY:
 // State
 // ============================================================================
 
-/** Currently active deep-fetch content injected for regeneration */
 let pendingDeepFetchContent = null;
-
-/** Flag to track if we're in a regeneration cycle from a FETCH intercept */
 let isRegenerating = false;
-
-/** Map of pointer_tag -> { entryUid, sectionHint } for resolving FETCH requests */
+let currentFetchDepth = 0;
 let activePointerMap = {};
+let autoSaveTimerId = null;
+let pendingSave = false;
+
+// ============================================================================
+// Debug Logging
+// ============================================================================
+
+function debugLog(...args) {
+    if (getSettings().debug_mode) {
+        console.log('[SmartRAG]', ...args);
+    }
+}
 
 // ============================================================================
 // Settings Management
@@ -96,34 +123,91 @@ function loadSettings() {
         extension_settings[EXTENSION_NAME] = {};
     }
 
-    // Apply defaults
     for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
         if (extension_settings[EXTENSION_NAME][key] === undefined) {
             extension_settings[EXTENSION_NAME][key] = value;
         }
     }
 
-    // Sync UI
+    syncUIFromSettings();
+}
+
+function syncUIFromSettings() {
     const s = extension_settings[EXTENSION_NAME];
+
+    // Basic
     $('#smart_rag_enabled').prop('checked', s.enabled);
     $('#smart_rag_worker_endpoint').val(s.worker_endpoint);
     $('#smart_rag_worker_model').val(s.worker_model);
     $('#smart_rag_worker_api_key').val(s.worker_api_key);
-    $('#smart_rag_min_content_length').val(s.min_content_length);
     $('#smart_rag_auto_generate').prop('checked', s.auto_generate);
     $('#smart_rag_inject_system_prompt').prop('checked', s.inject_system_prompt);
+
+    // Advanced: Cache & Saving
+    $('#smart_rag_save_interval').val(s.save_interval);
+    $('#smart_rag_cache_ttl').val(s.cache_ttl);
+    $('#smart_rag_max_cache_entries').val(s.max_cache_entries);
+
+    // Advanced: Content Thresholds
+    $('#smart_rag_min_content_length').val(s.min_content_length);
+    $('#smart_rag_max_lite_entries').val(s.max_lite_entries);
+
+    // Advanced: Worker AI Tuning
+    $('#smart_rag_worker_temperature').val(s.worker_temperature);
+    $('#smart_rag_worker_temperature_value').text(s.worker_temperature);
+    $('#smart_rag_worker_max_tokens').val(s.worker_max_tokens);
+    $('#smart_rag_worker_timeout').val(s.worker_timeout);
+
+    // Advanced: Injection
+    $('#smart_rag_injection_position').val(s.injection_position);
+    $('#smart_rag_injection_depth').val(s.injection_depth);
+    updateDepthRowVisibility(s.injection_position);
+
+    // Advanced: Deep Fetch
+    $('#smart_rag_max_fetch_depth').val(s.max_fetch_depth);
+    $('#smart_rag_show_fetch_toast').prop('checked', s.show_fetch_toast);
+
+    // Advanced: Debug
+    $('#smart_rag_debug_mode').prop('checked', s.debug_mode);
 }
 
 function saveSettings() {
     const s = extension_settings[EXTENSION_NAME];
+
+    // Basic
     s.enabled = $('#smart_rag_enabled').is(':checked');
     s.worker_endpoint = $('#smart_rag_worker_endpoint').val().trim();
     s.worker_model = $('#smart_rag_worker_model').val().trim();
     s.worker_api_key = $('#smart_rag_worker_api_key').val().trim();
-    s.min_content_length = parseInt($('#smart_rag_min_content_length').val()) || 500;
     s.auto_generate = $('#smart_rag_auto_generate').is(':checked');
     s.inject_system_prompt = $('#smart_rag_inject_system_prompt').is(':checked');
-    saveSettingsDebounced();
+
+    // Advanced: Cache & Saving
+    s.save_interval = parseInt($('#smart_rag_save_interval').val()) || 30;
+    s.cache_ttl = parseInt($('#smart_rag_cache_ttl').val()) || 0;
+    s.max_cache_entries = parseInt($('#smart_rag_max_cache_entries').val()) || 500;
+
+    // Advanced: Content Thresholds
+    s.min_content_length = parseInt($('#smart_rag_min_content_length').val()) || 500;
+    s.max_lite_entries = parseInt($('#smart_rag_max_lite_entries').val()) || 50;
+
+    // Advanced: Worker AI Tuning
+    s.worker_temperature = parseFloat($('#smart_rag_worker_temperature').val()) || 0.2;
+    s.worker_max_tokens = parseInt($('#smart_rag_worker_max_tokens').val()) || 1024;
+    s.worker_timeout = parseInt($('#smart_rag_worker_timeout').val()) || 60;
+
+    // Advanced: Injection
+    s.injection_position = parseInt($('#smart_rag_injection_position').val()) || 0;
+    s.injection_depth = parseInt($('#smart_rag_injection_depth').val()) || 4;
+
+    // Advanced: Deep Fetch
+    s.max_fetch_depth = parseInt($('#smart_rag_max_fetch_depth').val()) || 3;
+    s.show_fetch_toast = $('#smart_rag_show_fetch_toast').is(':checked');
+
+    // Advanced: Debug
+    s.debug_mode = $('#smart_rag_debug_mode').is(':checked');
+
+    scheduleSave();
 }
 
 function getSettings() {
@@ -131,17 +215,45 @@ function getSettings() {
 }
 
 // ============================================================================
+// Auto-Save Timer
+// ============================================================================
+
+function scheduleSave() {
+    const settings = getSettings();
+
+    if (settings.save_interval <= 0) {
+        saveSettingsDebounced();
+        return;
+    }
+
+    pendingSave = true;
+
+    if (!autoSaveTimerId) {
+        autoSaveTimerId = setInterval(() => {
+            if (pendingSave) {
+                saveSettingsDebounced();
+                pendingSave = false;
+                debugLog('Auto-saved settings');
+            }
+        }, settings.save_interval * 1000);
+    }
+}
+
+function stopAutoSave() {
+    if (autoSaveTimerId) {
+        clearInterval(autoSaveTimerId);
+        autoSaveTimerId = null;
+    }
+    if (pendingSave) {
+        saveSettingsDebounced();
+        pendingSave = false;
+    }
+}
+
+// ============================================================================
 // Worker AI Communication
 // ============================================================================
 
-/**
- * Calls the Worker AI with an OpenAI-compatible API to generate Lite JSON
- * from a full lorebook entry.
- *
- * @param {string} entryContent - Full text content of the lorebook entry
- * @param {string} entryName - Name/comment of the entry (for context)
- * @returns {object|null} Parsed Lite JSON object or null on failure
- */
 async function callWorkerAI(entryContent, entryName) {
     const settings = getSettings();
 
@@ -154,24 +266,27 @@ async function callWorkerAI(entryContent, entryName) {
                 content: `Lorebook entry name: "${entryName}"\n\nFull content:\n${entryContent}`,
             },
         ],
-        temperature: 0.2,
-        max_tokens: 1024,
+        temperature: settings.worker_temperature,
+        max_tokens: settings.worker_max_tokens,
     };
 
-    const headers = {
-        'Content-Type': 'application/json',
-    };
-
+    const headers = { 'Content-Type': 'application/json' };
     if (settings.worker_api_key) {
         headers['Authorization'] = `Bearer ${settings.worker_api_key}`;
     }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), settings.worker_timeout * 1000);
 
     try {
         const response = await fetch(settings.worker_endpoint, {
             method: 'POST',
             headers,
             body: JSON.stringify(requestBody),
+            signal: controller.signal,
         });
+
+        clearTimeout(timeoutId);
 
         if (!response.ok) {
             console.error(`[SmartRAG] Worker API error: ${response.status} ${response.statusText}`);
@@ -186,21 +301,23 @@ async function callWorkerAI(entryContent, entryName) {
             return null;
         }
 
-        // Extract JSON from response (handle markdown code blocks)
         const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, content];
         const jsonStr = jsonMatch[1].trim();
-
         const parsed = JSON.parse(jsonStr);
+
+        debugLog('Worker AI result for', entryName, ':', parsed);
         return parsed;
     } catch (err) {
-        console.error('[SmartRAG] Worker AI call failed:', err);
+        clearTimeout(timeoutId);
+        if (err.name === 'AbortError') {
+            console.error(`[SmartRAG] Worker AI request timed out after ${settings.worker_timeout}s`);
+        } else {
+            console.error('[SmartRAG] Worker AI call failed:', err);
+        }
         return null;
     }
 }
 
-/**
- * Tests the Worker AI connection with a simple request.
- */
 async function testWorkerConnection() {
     const statusEl = $('#smart_rag_status');
     statusEl.text('Testing connection...').attr('class', 'smart-rag-status info');
@@ -225,10 +342,6 @@ async function testWorkerConnection() {
 // Lite Cache Management
 // ============================================================================
 
-/**
- * Gets the lite cache from extension settings.
- * Cache is keyed by a hash of entry content for invalidation.
- */
 function getLiteCache() {
     const settings = getSettings();
     if (!settings.lite_cache) {
@@ -237,9 +350,6 @@ function getLiteCache() {
     return settings.lite_cache;
 }
 
-/**
- * Simple string hash for cache invalidation.
- */
 function hashContent(str) {
     let hash = 0;
     for (let i = 0; i < str.length; i++) {
@@ -251,42 +361,81 @@ function hashContent(str) {
 }
 
 /**
- * Gets or generates a Lite version for a lorebook entry.
- *
- * @param {string} uid - Unique identifier for the entry
- * @param {string} content - Full entry content
- * @param {string} name - Entry name/comment
- * @returns {object|null} Lite JSON or null
+ * Evicts expired and over-limit cache entries.
  */
+function evictCache() {
+    const settings = getSettings();
+    const cache = getLiteCache();
+    const keys = Object.keys(cache);
+
+    // Evict by TTL
+    if (settings.cache_ttl > 0) {
+        const now = Date.now();
+        const ttlMs = settings.cache_ttl * 3600 * 1000;
+        for (const key of keys) {
+            const entry = cache[key];
+            if (entry && entry._cached_at && (now - entry._cached_at) > ttlMs) {
+                delete cache[key];
+                debugLog('Evicted expired cache entry:', key);
+            }
+        }
+    }
+
+    // Evict by count (remove oldest first)
+    const remaining = Object.keys(cache);
+    if (remaining.length > settings.max_cache_entries) {
+        const sorted = remaining.sort((a, b) => {
+            const aTime = cache[a]?._cached_at || 0;
+            const bTime = cache[b]?._cached_at || 0;
+            return aTime - bTime;
+        });
+        const toRemove = sorted.slice(0, remaining.length - settings.max_cache_entries);
+        for (const key of toRemove) {
+            delete cache[key];
+            debugLog('Evicted over-limit cache entry:', key);
+        }
+    }
+}
+
 async function getOrGenerateLite(uid, content, name) {
     const settings = getSettings();
     const cache = getLiteCache();
     const contentHash = hashContent(content);
     const cacheKey = `${uid}_${contentHash}`;
 
-    // Return cached version if content hasn't changed
     if (cache[cacheKey]) {
-        return cache[cacheKey];
+        // Check TTL if set
+        if (settings.cache_ttl > 0) {
+            const ttlMs = settings.cache_ttl * 3600 * 1000;
+            if (cache[cacheKey]._cached_at && (Date.now() - cache[cacheKey]._cached_at) > ttlMs) {
+                delete cache[cacheKey];
+                debugLog('Cache expired for:', name);
+            } else {
+                return cache[cacheKey];
+            }
+        } else {
+            return cache[cacheKey];
+        }
     }
 
-    // Skip if content is too short
     if (content.length < settings.min_content_length) {
         return null;
     }
 
-    // Generate via Worker AI
     toastr.info(`Generating Lite Context for: ${name}`, 'Smart RAG', { timeOut: 3000 });
     const liteJson = await callWorkerAI(content, name);
 
     if (liteJson) {
-        // Clear old cache entries for this uid
+        // Clear old hashes for this uid
         for (const key of Object.keys(cache)) {
             if (key.startsWith(`${uid}_`)) {
                 delete cache[key];
             }
         }
+        liteJson._cached_at = Date.now();
         cache[cacheKey] = liteJson;
-        saveSettingsDebounced();
+        evictCache();
+        scheduleSave();
     }
 
     return liteJson;
@@ -296,9 +445,6 @@ async function getOrGenerateLite(uid, content, name) {
 // Lite Context Formatting
 // ============================================================================
 
-/**
- * Converts a Lite JSON object to the text format injected into the prompt.
- */
 function formatLiteContext(liteJson) {
     const attrs = liteJson.quick_attributes || {};
     const lines = [];
@@ -307,13 +453,11 @@ function formatLiteContext(liteJson) {
     lines.push(`Type: ${liteJson.entity_type}`);
     lines.push(`Core: ${liteJson.core_identity}`);
 
-    // Format attributes
     const attrParts = [];
     if (attrs.personality?.length) attrParts.push(`[Personality: ${attrs.personality.join(', ')}]`);
     if (attrs.appearance?.length) attrParts.push(`[Appearance: ${attrs.appearance.join(', ')}]`);
     if (attrs.speech_style?.length) attrParts.push(`[Speech: ${attrs.speech_style.join(', ')}]`);
 
-    // Include any extra attribute keys
     for (const [key, val] of Object.entries(attrs)) {
         if (!['personality', 'appearance', 'speech_style'].includes(key) && Array.isArray(val)) {
             attrParts.push(`[${key}: ${val.join(', ')}]`);
@@ -324,7 +468,6 @@ function formatLiteContext(liteJson) {
         lines.push(`Attributes: ${attrParts.join(' ')}`);
     }
 
-    // Format deep pointers
     const pointers = liteJson.deep_pointers || [];
     if (pointers.length) {
         lines.push('Available Deep Lore (Request using tag if needed):');
@@ -341,15 +484,10 @@ function formatLiteContext(liteJson) {
 // World Info / Lorebook Access
 // ============================================================================
 
-/**
- * Gets all active World Info entries from the current context.
- * Returns entries from all active lorebooks (global + character).
- */
 function getWorldInfoEntries() {
     const context = getContext();
     const entries = [];
 
-    // Access world info from the chat's active data
     if (context.worldInfo) {
         for (const [uid, entry] of Object.entries(context.worldInfo)) {
             if (entry && entry.content && !entry.disable) {
@@ -367,12 +505,6 @@ function getWorldInfoEntries() {
     return entries;
 }
 
-/**
- * Resolves a pointer tag to the full content from the original lorebook entry.
- *
- * @param {string} pointerTag - The pointer tag (e.g., #Alice_History)
- * @returns {string|null} The full section content or null
- */
 function resolvePointer(pointerTag) {
     const pointerInfo = activePointerMap[pointerTag];
     if (!pointerInfo) {
@@ -380,7 +512,6 @@ function resolvePointer(pointerTag) {
         return null;
     }
 
-    // Get the full entry content
     const entries = getWorldInfoEntries();
     const entry = entries.find(e => e.uid === pointerInfo.entryUid);
     if (!entry) {
@@ -392,28 +523,25 @@ function resolvePointer(pointerTag) {
 }
 
 // ============================================================================
-// Context Injection (Step 3: Lite Context into Prompt)
+// Context Injection (Step 3)
 // ============================================================================
 
-/**
- * Handles the GENERATION_STARTED event to inject Lite contexts and
- * the FETCH system instruction into the prompt.
- */
 async function onGenerationStarted(eventData) {
     const settings = getSettings();
     if (!settings.enabled) return;
 
-    // Reset pointer map for this generation
     activePointerMap = {};
 
     const entries = getWorldInfoEntries();
     const liteBlocks = [];
+    let count = 0;
 
     for (const entry of entries) {
+        if (count >= settings.max_lite_entries) break;
+
         const liteJson = await getOrGenerateLite(entry.uid, entry.content, entry.name);
 
         if (liteJson) {
-            // Register pointers
             if (liteJson.deep_pointers) {
                 for (const pointer of liteJson.deep_pointers) {
                     activePointerMap[pointer.pointer_tag] = {
@@ -422,48 +550,45 @@ async function onGenerationStarted(eventData) {
                     };
                 }
             }
-
             liteBlocks.push(formatLiteContext(liteJson));
+            count++;
         }
     }
 
-    // Inject lite contexts
     if (liteBlocks.length > 0) {
         const liteContent = '<Available_Knowledge>\n' + liteBlocks.join('\n\n') + '\n</Available_Knowledge>';
-
         const context = getContext();
         if (typeof context.setExtensionPrompt === 'function') {
             context.setExtensionPrompt(
                 EXTENSION_NAME + '_lite',
                 liteContent,
-                1,   // extension_prompt_types.IN_PROMPT
-                0,   // position (top of extensions area)
+                settings.injection_position,
+                settings.injection_depth,
             );
         }
+        debugLog(`Injected ${liteBlocks.length} Lite contexts at position ${settings.injection_position}`);
     }
 
-    // Inject FETCH system instruction
     if (settings.inject_system_prompt) {
         const context = getContext();
         if (typeof context.setExtensionPrompt === 'function') {
             context.setExtensionPrompt(
                 EXTENSION_NAME + '_system',
                 MAIN_AI_SYSTEM_INJECTION,
-                1,   // extension_prompt_types.IN_PROMPT
+                1, // BEFORE_PROMPT
                 0,
             );
         }
     }
 
-    // If we're regenerating after a FETCH, inject the deep content
     if (pendingDeepFetchContent) {
         const context = getContext();
         if (typeof context.setExtensionPrompt === 'function') {
             context.setExtensionPrompt(
                 EXTENSION_NAME + '_deep',
                 `<Deep_Lore_Response>\n${pendingDeepFetchContent}\n</Deep_Lore_Response>\nNow continue your response seamlessly using the deep lore above. Do not mention the fetch system.`,
-                1,
-                0,
+                settings.injection_position,
+                settings.injection_depth,
             );
         }
         pendingDeepFetchContent = null;
@@ -472,13 +597,9 @@ async function onGenerationStarted(eventData) {
 }
 
 // ============================================================================
-// FETCH Interception (Step 4: Deep Fetch)
+// FETCH Interception (Step 4)
 // ============================================================================
 
-/**
- * Intercepts AI messages to detect [FETCH: #pointer] commands.
- * If found, suppresses the message, resolves the pointer, and triggers regeneration.
- */
 async function onMessageReceived(messageIndex) {
     const settings = getSettings();
     if (!settings.enabled || isRegenerating) return;
@@ -493,43 +614,49 @@ async function onMessageReceived(messageIndex) {
 
     const text = message.mes || '';
 
-    // Check for FETCH command
     const fetchMatch = text.match(/\[FETCH:\s*(#[\w_]+)\s*\]/);
-    if (!fetchMatch) return;
+    if (!fetchMatch) {
+        currentFetchDepth = 0;
+        return;
+    }
+
+    // Loop protection
+    currentFetchDepth++;
+    if (currentFetchDepth > settings.max_fetch_depth) {
+        console.warn(`[SmartRAG] Max fetch depth (${settings.max_fetch_depth}) reached, stopping.`);
+        toastr.warning(`Max FETCH depth reached (${settings.max_fetch_depth}). Stopping to prevent loops.`, 'Smart RAG');
+        currentFetchDepth = 0;
+        return;
+    }
 
     const pointerTag = fetchMatch[1];
-    console.log(`[SmartRAG] Detected FETCH request for: ${pointerTag}`);
+    debugLog(`Detected FETCH request for: ${pointerTag} (depth ${currentFetchDepth})`);
 
-    // Resolve the pointer to full content
     const deepContent = resolvePointer(pointerTag);
     if (!deepContent) {
         console.warn(`[SmartRAG] Could not resolve pointer: ${pointerTag}`);
         toastr.warning(`Could not resolve pointer: ${pointerTag}`, 'Smart RAG');
+        currentFetchDepth = 0;
         return;
     }
 
-    // Set up the deep content for injection on regeneration
     pendingDeepFetchContent = `[Deep Lore for ${pointerTag}]\n${deepContent}`;
     isRegenerating = true;
 
-    toastr.info(`Fetching deep lore: ${pointerTag}`, 'Smart RAG', { timeOut: 2000 });
+    if (settings.show_fetch_toast) {
+        toastr.info(`Fetching deep lore: ${pointerTag}`, 'Smart RAG', { timeOut: 2000 });
+    }
 
-    // Delete the message with [FETCH] from chat
-    // Use ST's built-in method if available
     if (typeof context.deleteMessageByIndex === 'function') {
         await context.deleteMessageByIndex(messageIndex);
     } else {
-        // Fallback: remove from chat array and DOM
         chat.splice(messageIndex, 1);
         $(`.mes[mesid="${messageIndex}"]`).remove();
     }
 
-    // Trigger regeneration so the AI generates a proper response
-    // with the deep content available
     if (typeof context.generate === 'function') {
         await context.generate('normal');
     } else {
-        // Fallback: click the regenerate button
         $('#option_regenerate').trigger('click');
     }
 }
@@ -538,9 +665,6 @@ async function onMessageReceived(messageIndex) {
 // Bulk Operations
 // ============================================================================
 
-/**
- * Generates Lite versions for all active lorebook entries.
- */
 async function generateAllLiteEntries() {
     const settings = getSettings();
     if (!settings.worker_endpoint || !settings.worker_model) {
@@ -576,9 +700,6 @@ async function generateAllLiteEntries() {
     toastr.success(`Generated ${generated} Lite entries (${skipped} skipped)`, 'Smart RAG');
 }
 
-/**
- * Clears all cached Lite entries.
- */
 function clearLiteCache() {
     const settings = getSettings();
     settings.lite_cache = {};
@@ -589,17 +710,78 @@ function clearLiteCache() {
 }
 
 // ============================================================================
+// Cache Import / Export
+// ============================================================================
+
+function exportCache() {
+    const cache = getLiteCache();
+    const count = Object.keys(cache).length;
+
+    if (count === 0) {
+        toastr.info('Cache is empty, nothing to export.', 'Smart RAG');
+        return;
+    }
+
+    const blob = new Blob([JSON.stringify(cache, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `smart-rag-cache-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    toastr.success(`Exported ${count} cache entries.`, 'Smart RAG');
+}
+
+function importCache() {
+    $('#smart_rag_import_file').trigger('click');
+}
+
+function handleImportFile(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        try {
+            const imported = JSON.parse(e.target.result);
+            if (typeof imported !== 'object' || Array.isArray(imported)) {
+                throw new Error('Invalid format');
+            }
+
+            const settings = getSettings();
+            const cache = getLiteCache();
+            let count = 0;
+
+            for (const [key, value] of Object.entries(imported)) {
+                if (value && typeof value === 'object' && value.entity_name) {
+                    cache[key] = value;
+                    count++;
+                }
+            }
+
+            evictCache();
+            saveSettingsDebounced();
+            toastr.success(`Imported ${count} cache entries.`, 'Smart RAG');
+            $('#smart_rag_status').text(`Imported ${count} entries.`).attr('class', 'smart-rag-status success');
+        } catch (err) {
+            toastr.error(`Import failed: ${err.message}`, 'Smart RAG');
+        }
+    };
+    reader.readAsText(file);
+
+    // Reset so same file can be re-imported
+    event.target.value = '';
+}
+
+// ============================================================================
 // Chat Change Handler
 // ============================================================================
 
-/**
- * When a new chat is loaded, optionally pre-generate Lite versions.
- */
 async function onChatChanged() {
     const settings = getSettings();
     if (!settings.enabled || !settings.auto_generate) return;
 
-    // Small delay to let world info load
     await new Promise(r => setTimeout(r, 1000));
 
     const entries = getWorldInfoEntries();
@@ -618,9 +800,29 @@ async function onChatChanged() {
     }
 
     if (needsGeneration) {
-        console.log('[SmartRAG] Auto-generating Lite entries for new chat...');
+        debugLog('Auto-generating Lite entries for new chat...');
         await generateAllLiteEntries();
     }
+}
+
+// ============================================================================
+// UI Helpers
+// ============================================================================
+
+function updateDepthRowVisibility(positionValue) {
+    const depthRow = $('#smart_rag_depth_row');
+    if (parseInt(positionValue) === 4) {
+        depthRow.removeClass('hidden');
+    } else {
+        depthRow.addClass('hidden');
+    }
+}
+
+function toggleAdvancedSettings() {
+    const toggle = $('#smart_rag_advanced_toggle');
+    const content = $('#smart_rag_advanced_content');
+    toggle.toggleClass('open');
+    content.toggleClass('open');
 }
 
 // ============================================================================
@@ -628,28 +830,58 @@ async function onChatChanged() {
 // ============================================================================
 
 jQuery(async () => {
-    // Load HTML settings panel
     const settingsHtml = await $.get(`${EXTENSION_FOLDER}/index.html`);
     $('#extensions_settings2').append(settingsHtml);
 
-    // Load settings into UI
     loadSettings();
 
-    // Bind UI events
+    // === Basic settings bindings ===
     $('#smart_rag_enabled').on('change', saveSettings);
     $('#smart_rag_worker_endpoint').on('input', saveSettings);
     $('#smart_rag_worker_model').on('input', saveSettings);
     $('#smart_rag_worker_api_key').on('input', saveSettings);
-    $('#smart_rag_min_content_length').on('input', saveSettings);
     $('#smart_rag_auto_generate').on('change', saveSettings);
     $('#smart_rag_inject_system_prompt').on('change', saveSettings);
 
-    // Button handlers
+    // === Advanced settings bindings ===
+    $('#smart_rag_save_interval').on('input', () => {
+        stopAutoSave();
+        saveSettings();
+    });
+    $('#smart_rag_cache_ttl').on('input', saveSettings);
+    $('#smart_rag_max_cache_entries').on('input', saveSettings);
+    $('#smart_rag_min_content_length').on('input', saveSettings);
+    $('#smart_rag_max_lite_entries').on('input', saveSettings);
+    $('#smart_rag_worker_temperature').on('input', function () {
+        $('#smart_rag_worker_temperature_value').text($(this).val());
+        saveSettings();
+    });
+    $('#smart_rag_worker_max_tokens').on('input', saveSettings);
+    $('#smart_rag_worker_timeout').on('input', saveSettings);
+    $('#smart_rag_injection_position').on('change', function () {
+        updateDepthRowVisibility($(this).val());
+        saveSettings();
+    });
+    $('#smart_rag_injection_depth').on('input', saveSettings);
+    $('#smart_rag_max_fetch_depth').on('input', saveSettings);
+    $('#smart_rag_show_fetch_toast').on('change', saveSettings);
+    $('#smart_rag_debug_mode').on('change', saveSettings);
+
+    // === Button handlers ===
     $('#smart_rag_generate_all').on('click', generateAllLiteEntries);
     $('#smart_rag_clear_cache').on('click', clearLiteCache);
     $('#smart_rag_test_worker').on('click', testWorkerConnection);
+    $('#smart_rag_export_cache').on('click', exportCache);
+    $('#smart_rag_import_cache').on('click', importCache);
+    $('#smart_rag_import_file').on('change', handleImportFile);
 
-    // Register event hooks
+    // === Advanced spoiler toggle ===
+    $('#smart_rag_advanced_toggle').on('click', toggleAdvancedSettings);
+
+    // === Depth row visibility on load ===
+    updateDepthRowVisibility(getSettings().injection_position);
+
+    // === Event hooks ===
     eventSource.on(event_types.GENERATION_STARTED, onGenerationStarted);
     eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
     eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
