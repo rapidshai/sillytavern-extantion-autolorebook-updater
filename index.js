@@ -1,9 +1,21 @@
 /*
  * Smart RAG Lorebook - SillyTavern Extension
+ * Version 1.0.4
  *
- * Two-step RAG system for Lorebook entries:
- * 1. Worker AI compresses lorebook entries into Lite JSON format with pointers
- * 2. Main AI receives Lite context and can [FETCH: #pointer] for deep lore on demand
+ * ============================================================
+ * THIS EXTENSION WAS CREATED 100% WITH AI ASSISTANCE (CLAUDE OPUS).
+ * No human-written code. Fully AI-generated.
+ * ============================================================
+ *
+ * A non-destructive, two-step RAG system for Lorebook entries:
+ * 1. Worker AI (or optionally the Main AI) compresses lorebook entries
+ *    into structured Lite JSON format with deep-lore pointers.
+ * 2. Main AI receives Lite context ALONGSIDE (never replacing) the
+ *    original lorebook data, and can [FETCH: #pointer] for deep lore.
+ *
+ * Key principle: Original lorebook entries are NEVER modified or overwritten.
+ * All Lite data is stored separately in the extension's own cache and
+ * injected as an additional context layer.
  */
 
 import {
@@ -32,6 +44,8 @@ const DEFAULT_SETTINGS = {
     worker_api_key: '',
     auto_generate: true,
     inject_system_prompt: true,
+    // Main AI Mode
+    use_main_ai: false,
     // Advanced: Cache & Saving
     save_interval: 30,
     cache_ttl: 0,
@@ -84,7 +98,10 @@ Schema:
 const MAIN_AI_SYSTEM_INJECTION = `### DYNAMIC MEMORY SYSTEM ###
 You have access to a dynamic external memory system to save context space.
 Throughout the conversation, you may receive <Lite_Context> blocks containing brief summaries of characters, locations, or lore.
+These are ADDITIONAL structured data — the original lorebook entries remain intact.
 Inside these blocks, you will see "Available Deep Lore" with specific pointers starting with a hashtag (e.g., #Alice_History).
+
+IMPORTANT: Read the <Lite_Context> JSON blocks for quick reference. They contain structured summaries you should use.
 
 RULES FOR FETCHING MEMORY:
 1. If the user asks a question or creates a scenario that requires deep knowledge you currently lack, DO NOT hallucinate or invent facts.
@@ -102,6 +119,7 @@ let currentFetchDepth = 0;
 let activePointerMap = {};
 let autoSaveTimerId = null;
 let pendingSave = false;
+let isProcessingEntries = false;
 
 // ============================================================================
 // Debug Logging
@@ -111,6 +129,52 @@ function debugLog(...args) {
     if (getSettings().debug_mode) {
         console.log('[SmartRAG]', ...args);
     }
+}
+
+// ============================================================================
+// Progress Banner
+// ============================================================================
+
+const PROGRESS_BANNER_HTML = `
+<div id="smart-rag-progress-banner">
+    <div class="smart-rag-progress-header">
+        <span class="smart-rag-progress-icon fa-solid fa-brain"></span>
+        <span class="smart-rag-progress-title">Smart RAG Processing</span>
+    </div>
+    <div class="smart-rag-progress-text">Initializing...</div>
+    <div class="smart-rag-progress-bar-container">
+        <div class="smart-rag-progress-bar-fill" style="width: 0%"></div>
+    </div>
+    <div class="smart-rag-progress-counter">0 / 0</div>
+</div>
+`;
+
+function initProgressBanner() {
+    if ($('#smart-rag-progress-banner').length === 0) {
+        $('body').append(PROGRESS_BANNER_HTML);
+    }
+}
+
+function showProgressBanner(total) {
+    initProgressBanner();
+    const banner = $('#smart-rag-progress-banner');
+    banner.find('.smart-rag-progress-text').text('Starting...');
+    banner.find('.smart-rag-progress-bar-fill').css('width', '0%');
+    banner.find('.smart-rag-progress-counter').text(`0 / ${total}`);
+    banner.addClass('visible');
+}
+
+function updateProgressBanner(current, total, entryName) {
+    const banner = $('#smart-rag-progress-banner');
+    const pct = Math.round((current / total) * 100);
+    banner.find('.smart-rag-progress-text').text(`Processing: ${entryName}`);
+    banner.find('.smart-rag-progress-bar-fill').css('width', `${pct}%`);
+    banner.find('.smart-rag-progress-counter').text(`${current} / ${total}`);
+}
+
+function hideProgressBanner() {
+    const banner = $('#smart-rag-progress-banner');
+    banner.removeClass('visible');
 }
 
 // ============================================================================
@@ -141,6 +205,10 @@ function syncUIFromSettings() {
     $('#smart_rag_worker_api_key').val(s.worker_api_key);
     $('#smart_rag_auto_generate').prop('checked', s.auto_generate);
     $('#smart_rag_inject_system_prompt').prop('checked', s.inject_system_prompt);
+
+    // Main AI Mode
+    $('#smart_rag_use_main_ai').prop('checked', s.use_main_ai);
+    updateWorkerFieldsVisibility(s.use_main_ai);
 
     // Advanced: Cache & Saving
     $('#smart_rag_save_interval').val(s.save_interval);
@@ -180,6 +248,9 @@ function saveSettings() {
     s.worker_api_key = $('#smart_rag_worker_api_key').val().trim();
     s.auto_generate = $('#smart_rag_auto_generate').is(':checked');
     s.inject_system_prompt = $('#smart_rag_inject_system_prompt').is(':checked');
+
+    // Main AI Mode
+    s.use_main_ai = $('#smart_rag_use_main_ai').is(':checked');
 
     // Advanced: Cache & Saving
     s.save_interval = parseInt($('#smart_rag_save_interval').val()) || 30;
@@ -300,12 +371,7 @@ async function callWorkerAI(entryContent, entryName) {
             return null;
         }
 
-        const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, content];
-        const jsonStr = jsonMatch[1].trim();
-        const parsed = JSON.parse(jsonStr);
-
-        debugLog('Worker AI result for', entryName, ':', parsed);
-        return parsed;
+        return parseJsonResponse(content, entryName);
     } catch (err) {
         clearTimeout(timeoutId);
         if (err.name === 'AbortError') {
@@ -317,23 +383,109 @@ async function callWorkerAI(entryContent, entryName) {
     }
 }
 
-async function testWorkerConnection() {
-    const statusEl = $('#smart_rag_status');
-    statusEl.text('Testing connection...').attr('class', 'smart-rag-status info');
+// ============================================================================
+// Main AI Communication (uses SillyTavern's active AI connection)
+// ============================================================================
+
+async function callMainAI(entryContent, entryName) {
+    const context = getContext();
+
+    if (typeof context.generateQuietPrompt !== 'function') {
+        console.error('[SmartRAG] generateQuietPrompt is not available in this SillyTavern version.');
+        toastr.error('Main AI processing requires SillyTavern 1.12+. Please use Worker AI mode instead.', 'Smart RAG');
+        return null;
+    }
+
+    const prompt = [
+        WORKER_SYSTEM_PROMPT,
+        '',
+        `Lorebook entry name: "${entryName}"`,
+        '',
+        'Full content:',
+        entryContent,
+        '',
+        'Output ONLY the JSON, nothing else:',
+    ].join('\n');
 
     try {
-        const result = await callWorkerAI(
+        debugLog('Calling Main AI for:', entryName);
+        const response = await context.generateQuietPrompt(prompt);
+
+        if (!response) {
+            console.error('[SmartRAG] Main AI returned empty response');
+            return null;
+        }
+
+        return parseJsonResponse(response, entryName);
+    } catch (err) {
+        console.error('[SmartRAG] Main AI call failed:', err);
+        return null;
+    }
+}
+
+// ============================================================================
+// Shared JSON Parsing
+// ============================================================================
+
+function parseJsonResponse(content, entryName) {
+    try {
+        const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, content];
+        let jsonStr = jsonMatch[1].trim();
+
+        // Try to find JSON object if the response has extra text
+        const braceStart = jsonStr.indexOf('{');
+        const braceEnd = jsonStr.lastIndexOf('}');
+        if (braceStart !== -1 && braceEnd !== -1) {
+            jsonStr = jsonStr.substring(braceStart, braceEnd + 1);
+        }
+
+        const parsed = JSON.parse(jsonStr);
+        debugLog('Parsed result for', entryName, ':', parsed);
+        return parsed;
+    } catch (err) {
+        console.error(`[SmartRAG] Failed to parse JSON for "${entryName}":`, err);
+        return null;
+    }
+}
+
+// ============================================================================
+// Unified AI Call (routes to Worker or Main AI based on settings)
+// ============================================================================
+
+async function callAI(entryContent, entryName) {
+    const settings = getSettings();
+
+    if (settings.use_main_ai) {
+        return callMainAI(entryContent, entryName);
+    }
+
+    return callWorkerAI(entryContent, entryName);
+}
+
+// ============================================================================
+// Connection Test
+// ============================================================================
+
+async function testWorkerConnection() {
+    const statusEl = $('#smart_rag_status');
+    const settings = getSettings();
+    const modeLabel = settings.use_main_ai ? 'Main AI' : 'Worker AI';
+
+    statusEl.text(`Testing ${modeLabel} connection...`).attr('class', 'smart-rag-status info');
+
+    try {
+        const result = await callAI(
             'Alice is a powerful mage who lives in a dark tower. She has black hair and glowing eyes. She lost her family at age 10 when raiders destroyed her village.',
             'Test Entry',
         );
 
         if (result && result.entity_name) {
-            statusEl.text(`Connection OK! Got: ${result.entity_name} (${result.entity_type})`).attr('class', 'smart-rag-status success');
+            statusEl.text(`${modeLabel} OK! Got: ${result.entity_name} (${result.entity_type})`).attr('class', 'smart-rag-status success');
         } else {
-            statusEl.text('Connection succeeded but response format is unexpected.').attr('class', 'smart-rag-status error');
+            statusEl.text(`${modeLabel} responded but format is unexpected.`).attr('class', 'smart-rag-status error');
         }
     } catch (err) {
-        statusEl.text(`Connection failed: ${err.message}`).attr('class', 'smart-rag-status error');
+        statusEl.text(`${modeLabel} failed: ${err.message}`).attr('class', 'smart-rag-status error');
     }
 }
 
@@ -396,7 +548,7 @@ function evictCache() {
     }
 }
 
-async function getOrGenerateLite(uid, content, name) {
+async function getOrGenerateLite(uid, content, name, showToast = true) {
     const settings = getSettings();
     const cache = getLiteCache();
     const contentHash = hashContent(content);
@@ -421,8 +573,11 @@ async function getOrGenerateLite(uid, content, name) {
         return null;
     }
 
-    toastr.info(`Generating Lite Context for: ${name}`, 'Smart RAG', { timeOut: 3000 });
-    const liteJson = await callWorkerAI(content, name);
+    if (showToast) {
+        toastr.info(`Generating Lite Context for: ${name}`, 'Smart RAG', { timeOut: 3000 });
+    }
+
+    const liteJson = await callAI(content, name);
 
     if (liteJson) {
         // Clear old hashes for this uid
@@ -480,7 +635,7 @@ function formatLiteContext(liteJson) {
 }
 
 // ============================================================================
-// World Info / Lorebook Access
+// World Info / Lorebook Access (READ-ONLY — never modifies entries)
 // ============================================================================
 
 function getWorldInfoEntries() {
@@ -522,7 +677,7 @@ function resolvePointer(pointerTag) {
 }
 
 // ============================================================================
-// Context Injection (Step 3)
+// Context Injection (non-destructive — adds alongside, never replaces)
 // ============================================================================
 
 async function onGenerationStarted(eventData) {
@@ -535,10 +690,39 @@ async function onGenerationStarted(eventData) {
     const liteBlocks = [];
     let count = 0;
 
+    // Find entries that need processing (uncached)
+    const uncachedEntries = [];
+    for (const entry of entries) {
+        if (count >= settings.max_lite_entries) break;
+        const cache = getLiteCache();
+        const contentHash = hashContent(entry.content);
+        const cacheKey = `${entry.uid}_${contentHash}`;
+        if (!cache[cacheKey] && entry.content.length >= settings.min_content_length) {
+            uncachedEntries.push(entry);
+        }
+        count++;
+    }
+
+    // Show progress banner if there are entries to process
+    const totalToProcess = uncachedEntries.length;
+    if (totalToProcess > 0) {
+        showProgressBanner(totalToProcess);
+        isProcessingEntries = true;
+    }
+
+    count = 0;
+    let processedCount = 0;
+
     for (const entry of entries) {
         if (count >= settings.max_lite_entries) break;
 
-        const liteJson = await getOrGenerateLite(entry.uid, entry.content, entry.name);
+        // Update progress if this entry needs processing
+        if (uncachedEntries.includes(entry)) {
+            processedCount++;
+            updateProgressBanner(processedCount, totalToProcess, entry.name);
+        }
+
+        const liteJson = await getOrGenerateLite(entry.uid, entry.content, entry.name, false);
 
         if (liteJson) {
             if (liteJson.deep_pointers) {
@@ -552,6 +736,12 @@ async function onGenerationStarted(eventData) {
             liteBlocks.push(formatLiteContext(liteJson));
             count++;
         }
+    }
+
+    // Hide progress banner
+    if (totalToProcess > 0) {
+        hideProgressBanner();
+        isProcessingEntries = false;
     }
 
     if (liteBlocks.length > 0) {
@@ -596,7 +786,7 @@ async function onGenerationStarted(eventData) {
 }
 
 // ============================================================================
-// FETCH Interception (Step 4)
+// FETCH Interception
 // ============================================================================
 
 async function onMessageReceived(messageIndex) {
@@ -666,8 +856,9 @@ async function onMessageReceived(messageIndex) {
 
 async function generateAllLiteEntries() {
     const settings = getSettings();
-    if (!settings.worker_endpoint || !settings.worker_model) {
-        toastr.error('Please configure Worker AI endpoint and model first.', 'Smart RAG');
+
+    if (!settings.use_main_ai && (!settings.worker_endpoint || !settings.worker_model)) {
+        toastr.error('Please configure Worker AI endpoint and model first, or enable Main AI mode.', 'Smart RAG');
         return;
     }
 
@@ -679,24 +870,49 @@ async function generateAllLiteEntries() {
         return;
     }
 
-    let generated = 0;
-    let skipped = 0;
+    // Filter entries that need processing
+    const entriesToProcess = entries.filter(e => {
+        if (e.content.length < settings.min_content_length) return false;
+        const cache = getLiteCache();
+        const contentHash = hashContent(e.content);
+        const cacheKey = `${e.uid}_${contentHash}`;
+        return !cache[cacheKey];
+    });
 
-    for (let i = 0; i < entries.length; i++) {
-        const entry = entries[i];
-        statusEl.text(`Processing ${i + 1}/${entries.length}: ${entry.name}...`).attr('class', 'smart-rag-status info');
+    const totalNeedProcessing = entriesToProcess.length;
+    const totalSkippedShort = entries.filter(e => e.content.length < settings.min_content_length).length;
+    const alreadyCached = entries.length - totalNeedProcessing - totalSkippedShort;
 
-        if (entry.content.length < settings.min_content_length) {
-            skipped++;
-            continue;
-        }
-
-        const result = await getOrGenerateLite(entry.uid, entry.content, entry.name);
-        if (result) generated++;
+    if (totalNeedProcessing === 0) {
+        statusEl.text(`All entries already cached (${alreadyCached} cached, ${totalSkippedShort} too short).`).attr('class', 'smart-rag-status success');
+        return;
     }
 
-    statusEl.text(`Done! Generated: ${generated}, Skipped (too short): ${skipped}`).attr('class', 'smart-rag-status success');
-    toastr.success(`Generated ${generated} Lite entries (${skipped} skipped)`, 'Smart RAG');
+    showProgressBanner(totalNeedProcessing);
+    isProcessingEntries = true;
+
+    let generated = 0;
+    let failed = 0;
+
+    for (let i = 0; i < entriesToProcess.length; i++) {
+        const entry = entriesToProcess[i];
+        updateProgressBanner(i + 1, totalNeedProcessing, entry.name);
+        statusEl.text(`Processing ${i + 1}/${totalNeedProcessing}: ${entry.name}...`).attr('class', 'smart-rag-status info');
+
+        const result = await getOrGenerateLite(entry.uid, entry.content, entry.name, false);
+        if (result) {
+            generated++;
+        } else {
+            failed++;
+        }
+    }
+
+    hideProgressBanner();
+    isProcessingEntries = false;
+
+    const summary = `Done! Generated: ${generated}, Failed: ${failed}, Already cached: ${alreadyCached}, Too short: ${totalSkippedShort}`;
+    statusEl.text(summary).attr('class', 'smart-rag-status success');
+    toastr.success(`Generated ${generated} Lite entries`, 'Smart RAG');
 }
 
 function clearLiteCache() {
@@ -748,7 +964,6 @@ function handleImportFile(event) {
                 throw new Error('Invalid format');
             }
 
-            const settings = getSettings();
             const cache = getLiteCache();
             let count = 0;
 
@@ -817,6 +1032,15 @@ function updateDepthRowVisibility(positionValue) {
     }
 }
 
+function updateWorkerFieldsVisibility(useMainAI) {
+    const workerFields = $('#smart_rag_worker_fields');
+    if (useMainAI) {
+        workerFields.addClass('hidden');
+    } else {
+        workerFields.removeClass('hidden');
+    }
+}
+
 function toggleAdvancedSettings() {
     const toggle = $('#smart_rag_advanced_toggle');
     const content = $('#smart_rag_advanced_content');
@@ -848,25 +1072,45 @@ const SETTINGS_HTML = `
 
             <hr />
 
-            <h4>Worker AI Connection</h4>
+            <!-- ========== MAIN AI MODE ========== -->
 
-            <div class="smart-rag-setting-row">
-                <label for="smart_rag_worker_endpoint">API Endpoint</label>
-                <input type="text" id="smart_rag_worker_endpoint" class="text_pole" placeholder="http://localhost:11434/v1/chat/completions" />
-                <small class="smart-rag-hint">OpenAI-compatible endpoint (Ollama, LM Studio, OpenRouter, etc.)</small>
-            </div>
-
-            <div class="smart-rag-setting-row">
-                <label for="smart_rag_worker_model">Model Name</label>
-                <input type="text" id="smart_rag_worker_model" class="text_pole" placeholder="llama3:8b" />
-            </div>
-
-            <div class="smart-rag-setting-row">
-                <label for="smart_rag_worker_api_key">API Key (optional)</label>
-                <input type="password" id="smart_rag_worker_api_key" class="text_pole" placeholder="Leave empty for local models" />
+            <div class="smart-rag-setting-row smart-rag-main-ai-section">
+                <label class="checkbox_label" for="smart_rag_use_main_ai">
+                    <input type="checkbox" id="smart_rag_use_main_ai" />
+                    <span>Use Main AI for processing</span>
+                </label>
+                <small class="smart-rag-hint">
+                    When enabled, lorebook entries are processed using your main SillyTavern AI connection
+                    instead of a separate Worker AI. This is slower but requires no additional setup.
+                    A progress indicator will appear at the top of the screen during processing.
+                </small>
             </div>
 
             <hr />
+
+            <!-- ========== WORKER AI CONNECTION (hidden when Main AI is on) ========== -->
+
+            <div id="smart_rag_worker_fields">
+                <h4>Worker AI Connection</h4>
+
+                <div class="smart-rag-setting-row">
+                    <label for="smart_rag_worker_endpoint">API Endpoint</label>
+                    <input type="text" id="smart_rag_worker_endpoint" class="text_pole" placeholder="http://localhost:11434/v1/chat/completions" />
+                    <small class="smart-rag-hint">OpenAI-compatible endpoint (Ollama, LM Studio, OpenRouter, etc.)</small>
+                </div>
+
+                <div class="smart-rag-setting-row">
+                    <label for="smart_rag_worker_model">Model Name</label>
+                    <input type="text" id="smart_rag_worker_model" class="text_pole" placeholder="llama3:8b" />
+                </div>
+
+                <div class="smart-rag-setting-row">
+                    <label for="smart_rag_worker_api_key">API Key (optional)</label>
+                    <input type="password" id="smart_rag_worker_api_key" class="text_pole" placeholder="Leave empty for local models" />
+                </div>
+
+                <hr />
+            </div>
 
             <h4>Basic Behavior</h4>
 
@@ -1058,6 +1302,12 @@ jQuery(async () => {
     $('#smart_rag_auto_generate').on('change', saveSettings);
     $('#smart_rag_inject_system_prompt').on('change', saveSettings);
 
+    // === Main AI mode binding ===
+    $('#smart_rag_use_main_ai').on('change', function () {
+        updateWorkerFieldsVisibility($(this).is(':checked'));
+        saveSettings();
+    });
+
     // === Advanced settings bindings ===
     $('#smart_rag_save_interval').on('input', () => {
         stopAutoSave();
@@ -1101,5 +1351,5 @@ jQuery(async () => {
     eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
     eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
 
-    console.log('[SmartRAG] Smart RAG Lorebook extension loaded.');
+    console.log('[SmartRAG] Smart RAG Lorebook extension v1.0.4 loaded.');
 });

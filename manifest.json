@@ -6,6 +6,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "RapidShai",
-    "version": "1.0.2",
-    "homePage": "https://github.com/rapidshai/sillytavern-extantion-autolorebook-updater"
+    "version": "1.0.4",
+    "homePage": "https://github.com/rapidshai/sillytavern-extantion-autolorebook-updater",
+    "description": "A non-destructive two-step RAG system for lorebook entries. Compresses long entries into structured Lite JSON with deep-lore pointers. Original entries are never modified. Supports Worker AI or Main AI processing with live progress tracking. Created 100% with AI assistance (Claude Opus)."
 }
