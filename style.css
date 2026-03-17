@@ -1,0 +1,61 @@
+#smart-rag-lorebook-settings .smart-rag-setting-row {
+    margin-bottom: 10px;
+}
+
+#smart-rag-lorebook-settings .smart-rag-setting-row label:not(.checkbox_label) {
+    display: block;
+    margin-bottom: 4px;
+    font-weight: 600;
+}
+
+#smart-rag-lorebook-settings .smart-rag-hint {
+    display: block;
+    margin-top: 2px;
+    color: var(--SmartThemeQuoteColor, #888);
+    font-size: 0.85em;
+}
+
+#smart-rag-lorebook-settings .smart-rag-button-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+#smart-rag-lorebook-settings .smart-rag-button-row .menu_button {
+    flex: 1;
+    min-width: 120px;
+}
+
+#smart-rag-lorebook-settings .smart-rag-status {
+    margin-top: 10px;
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 0.9em;
+    min-height: 1.2em;
+}
+
+#smart-rag-lorebook-settings .smart-rag-status.success {
+    background-color: rgba(0, 180, 0, 0.15);
+    color: #0a0;
+}
+
+#smart-rag-lorebook-settings .smart-rag-status.error {
+    background-color: rgba(180, 0, 0, 0.15);
+    color: #a00;
+}
+
+#smart-rag-lorebook-settings .smart-rag-status.info {
+    background-color: rgba(0, 120, 180, 0.15);
+    color: #08a;
+}
+
+#smart-rag-lorebook-settings hr {
+    margin: 12px 0;
+    border: none;
+    border-top: 1px solid var(--SmartThemeBorderColor, #444);
+}
+
+#smart-rag-lorebook-settings h4 {
+    margin: 6px 0 8px;
+    font-size: 1em;
+}
